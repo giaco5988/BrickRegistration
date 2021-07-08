@@ -1,13 +1,19 @@
-import pybullet as p
+import os
 import time
-import pybullet_data
+import glob
 import random
-from PIL import Image
-import os, glob
 import math
-import numpy as np
 from pathlib import Path
+import logging
+
+from PIL import Image
+import pybullet as p
+import pybullet_data
+import numpy as np
 from scipy.spatial.transform import Rotation
+from tqdm.auto import tqdm
+
+LOGGER = logging.getLogger(__name__)
 
 
 def renderGenerator(mode, colors, allurdfWithClassId, rng, nbobj, nbview, outFolder, sceneName):
@@ -34,46 +40,50 @@ def renderGenerator(mode, colors, allurdfWithClassId, rng, nbobj, nbview, outFol
 
     segIdToClass= [0]
 
-    for i in range(nbobj):
-      cubeStartPos = [rng.uniform(-30,30),rng.uniform(-30,30),rng.uniform(10,50)]
-      cubeStartOrientation = p.getQuaternionFromEuler([rng.uniform(-math.pi,math.pi),rng.uniform(-math.pi,math.pi),rng.uniform(-math.pi,math.pi)])
-      try:
-        print("loading object " + str(i) + " / " + str(nbobj) )
-        (objname,objid) = rng.choice(allurdfWithClassId)
-        print(objname)
-        #we don't use loadURDF to be able to change the color of the bricks easily
-        #objs.append( p.loadURDF(objname,cubeStartPos,cubeStartOrientation ))
+    for i in tqdm(range(nbobj), total=nbobj, desc=f'Load objects scene {sceneName}'):
+        cubeStartPos = [rng.uniform(-30,30),rng.uniform(-30,30),rng.uniform(10,50)]
+        cubeStartOrientation = p.getQuaternionFromEuler([rng.uniform(-math.pi,math.pi),rng.uniform(-math.pi,math.pi),rng.uniform(-math.pi,math.pi)])
+        try:
+            LOGGER.debug("loading object " + str(i) + " / " + str(nbobj))
+            (objname,objid) = rng.choice(allurdfWithClassId)
+            LOGGER.debug(objname)
+            #we don't use loadURDF to be able to change the color of the bricks easily
+            #objs.append( p.loadURDF(objname,cubeStartPos,cubeStartOrientation ))
 
-        #When we create multiple instances of the same object
-        #there are some performance gain to share the shapes between rigid bodies
-        #Instead of p.loadURDF you can use the following
-        name = Path(objname).name
-        nameroot = name[:-5]
-        partition = objname.split("/")[0]
-        color = rng.choice(colors)
-        vs = p.createVisualShape(p.GEOM_MESH,fileName=partition+"/"+nameroot+"/"+nameroot+".obj",meshScale=meshScale, rgbaColor=color )
-        #because of the color is inside the visual shape we don't share the visual shape so similar instances can have different colors
-        cuid = 0
-        #but we share the collision shapes
-        if name in collisionDict:
-            cuid = collisionDict[name]
-        else:
-            cuid = p.createCollisionShape(p.GEOM_MESH,fileName=partition+"/"+nameroot+"/"+nameroot+"_vhacd.obj",meshScale=meshScale)
-            collisionDict[name]=cuid
-        objs.append( p.createMultiBody(1.0,cuid,vs,cubeStartPos,cubeStartOrientation) )
-        segIdToClass.append(objid)
-      except:
-        print("failed to load : " + objname )
+            #When we create multiple instances of the same object
+            #there are some performance gain to share the shapes between rigid bodies
+            #Instead of p.loadURDF you can use the following
+            name = Path(objname).name
+            nameroot = os.path.splitext(str(name))[0]
+            partition = os.path.dirname(objname)
+            color = rng.choice(colors)
+            filename = os.path.join(partition, nameroot, f"{nameroot}.obj")
+            # vs = p.createVisualShape(p.GEOM_MESH, fileName=partition+"/"+nameroot+"/"+nameroot+".obj", meshScale=meshScale,rgbaColor=color )
+            vs = p.createVisualShape(p.GEOM_MESH, fileName=filename, meshScale=meshScale, rgbaColor=color)
+            #because of the color is inside the visual shape we don't share the visual shape so similar instances can have different colors
+            cuid = 0
+            #but we share the collision shapes
+            if name in collisionDict:
+                cuid = collisionDict[name]
+            else:
+                # cuid = p.createCollisionShape(p.GEOM_MESH,fileName=partition+"/"+nameroot+"/"+nameroot+"_vhacd.obj",meshScale=meshScale)
+                filename = os.path.join(partition, nameroot, f"{nameroot}_vhacd.obj")
+                cuid = p.createCollisionShape(p.GEOM_MESH, fileName=filename, meshScale=meshScale)
+                collisionDict[name] = cuid
+            objs.append(p.createMultiBody(1.0, cuid, vs, cubeStartPos, cubeStartOrientation))
+            segIdToClass.append(objid)
+        except:
+            LOGGER.warning("failed to load : " + objname)
 
-    p.setGravity(0,0,-10)
+    p.setGravity(0, 0, -10)
 
     nbsteps = 500
     for i in range(nbsteps):
-      p.stepSimulation()
-      print("step " + str(i) + " / " + str( nbsteps ) )
+        p.stepSimulation()
+        LOGGER.debug("step " + str(i) + " / " + str( nbsteps ) )
 
-    for j in range(nbview):
-        print("rendering view " + str(j))
+    for j in tqdm(range(nbview), total=nbview, desc=f'Render view scene {sceneName}'):
+        LOGGER.debug("rendering view " + str(j))
         ang = rng.uniform(-math.pi,math.pi)
         r = rng.uniform(1,30)
         h = rng.uniform(50,100)
@@ -84,9 +94,7 @@ def renderGenerator(mode, colors, allurdfWithClassId, rng, nbobj, nbview, outFol
 
         camParams = [r*math.cos(ang),r*math.sin(ang),h,   0,0,0,   0,0,1, fov,aspect,nearVal,farVal ]
 
-        print("camParams")
-        print(camParams)
-
+        LOGGER.debug("camParams", camParams)
 
         viewMatrix = p.computeViewMatrix(
             cameraEyePosition=camParams[0:3],
@@ -107,7 +115,8 @@ def renderGenerator(mode, colors, allurdfWithClassId, rng, nbobj, nbview, outFol
 
         Path(outFolder).mkdir(parents=True, exist_ok=True)
         viewStr = "-view"+str(j)
-        im = Image.fromarray(rgbImg)
+        rgb_array = np.reshape(rgbImg, (height, width, 4)).astype(np.uint8)
+        im = Image.fromarray(rgb_array)
         im.save(outFolder +"/" + sceneName + viewStr + ".png")
 
         #We also compute here information which will be interesting to try to predict
@@ -184,9 +193,12 @@ def renderGenerator(mode, colors, allurdfWithClassId, rng, nbobj, nbview, outFol
 
     p.disconnect()
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+
     # use mode = p.DIRECT for usage without gui
-    #mode = p.GUI
+    # mode = p.GUI
     mode = p.DIRECT
     # In GUI mode it became slow at around 500 objects
     # In Direct mode, I could run it OK with 3000 similar object
@@ -196,17 +208,17 @@ if __name__=="__main__":
     colors = [[rng.uniform(0, 1), rng.uniform(0, 1), rng.uniform(0, 1), 1.0] for i in range(nbColors)]
 
     # we exclude all files beginning by _ for example _prototype.urdf
-    allurdf = sorted(glob.glob("lego-*/[!_]*.urdf"))
-    print("Number of urdf :" + str(len(allurdf)))
+    all_urdf = sorted(glob.glob("**/*lego-*/[!_]*.urdf"))
+    LOGGER.info("Number of urdf :" + str(len(all_urdf)))
 
     nbobj = 100
-
     nbview = 10
 
-    #We reserve class 0 for background
-    allurdfWithClassId = [ (allurdf[i],i+1) for i in range(len(allurdf))]
+    # We reserve class 0 for background
+    allurdfWithClassId = [(all_urdf[i], i + 1) for i in range(len(all_urdf))]
     rng = random.Random(42)
     renderGenerator(mode, colors,allurdfWithClassId, rng,nbobj,nbview,"Renderings", "Scene0")
-    #It 's deterministic and we get the same results
+
+    # It 's deterministic and we get the same results
     rng = random.Random(42)
     renderGenerator(mode, colors, allurdfWithClassId, rng,nbobj,nbview,"Renderings", "Scene0bis")
